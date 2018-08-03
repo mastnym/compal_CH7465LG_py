@@ -2,17 +2,12 @@
 Client for the Compal CH7465LG/Ziggo Connect box cable modem
 """
 import io
-import itertools
 import logging
 import urllib
 
 from xml.dom import minidom
 from enum import Enum
 from collections import OrderedDict
-from lxml import etree
-
-# recordclass is a mutable variation on `collections.NamedTuple
-from recordclass import recordclass
 
 import requests
 
@@ -271,135 +266,6 @@ class Proto(Enum):
     both = 3
 
 
-PortForward = recordclass('PortForward', [  # pylint: disable=invalid-name
-    'local_ip', 'ext_port', 'int_port', 'proto', 'enabled', 'delete', 'idd',
-    'id', 'lan_ip'])
-# idd, id, lan_ip are None by default, delte is False by default
-PortForward.__new__.__defaults__ = (False, None, None, None,)
-
-
-class PortForwards(object):
-    """
-    Manage the port forwards on the modem
-    """
-    def __init__(self, modem):
-        # The modem sometimes returns invalid XML when 'strange' values are
-        # present in the settings. The recovering parser from lxml is used to
-        # handle this.
-        self.parser = etree.XMLParser(recover=True)
-
-        self.modem = modem
-
-    @property
-    def rules(self):
-        """
-        Retrieve the current port forwarding rules
-
-        @returns generator of PortForward rules
-        """
-        res = self.modem.xml_getter(Get.FORWARDING, {})
-
-        xml = etree.fromstring(res.content, parser=self.parser)
-        router_ip = xml.find('LanIP').text
-
-        def r_int(rule, attr):
-            """
-            integer value for rule's child's text
-            """
-            return int(rule.find(attr).text)
-
-        for rule in xml.findall('instance'):
-            yield PortForward(
-                local_ip=rule.find('local_IP').text,
-                lan_ip=router_ip,
-                id=r_int(rule, 'id'),
-                ext_port=(r_int(rule, 'start_port'),
-                          r_int(rule, 'end_port')),
-                int_port=(r_int(rule, 'start_portIn'),
-                          r_int(rule, 'end_portIn')),
-                proto=Proto(r_int(rule, 'protocol')),
-                enabled=bool(r_int(rule, 'enable')),
-                idd=bool(r_int(rule, 'idd'))
-            )
-
-    def update_firewall(self, enabled=False, fragment=False, port_scan=False,
-                        ip_flood=False, icmp_flood=False, icmp_rate=15):
-        """
-        Update the firewall rules
-        """
-        assert enabled or not (fragment or port_scan or ip_flood or icmp_flood)
-
-        def b2i(_bool):
-            """
-            Bool-2-int with non-standard mapping
-            """
-            return 1 if _bool else 2
-
-        return self.modem.xml_setter(Set.FIREWALL, OrderedDict([
-            ('firewallProtection', b2i(enabled)),
-            ('blockIpFragments', ''),
-            ('portScanDetection', ''),
-            ('synFloodDetection', ''),
-            ('IcmpFloodDetection', ''),
-            ('IcmpFloodDetectRate', icmp_rate),
-            ('action', ''),
-            ('IPv6firewallProtection', ''),
-            ('IPv6blockIpFragments', ''),
-            ('IPv6portScanDetection', ''),
-            ('IPv6synFloodDetection', ''),
-            ('IPv6IcmpFloodDetection', ''),
-            ('IPv6IcmpFloodDetectRate', '')
-        ]))
-
-    def add_forward(self, local_ip, ext_port, int_port, proto: Proto,
-                    enabled=True):
-        """
-        Add a port forward. int_port and ext_port can be ranges. Deletion
-        param is ignored for now.
-        """
-        start_int, end_int = itertools.islice(itertools.repeat(int_port), 0, 2)
-        start_ext, end_ext = itertools.islice(itertools.repeat(ext_port), 0, 2)
-
-        return self.modem.xml_setter(Set.PORT_FORWARDING, OrderedDict([
-            ('action', 'add'),
-            ('instance', ''),
-            ('local_IP', local_ip),
-            ('start_port', start_ext), ('end_port', end_ext),
-            ('start_portIn', start_int), ('end_portIn', end_int),
-            ('protocol', proto.value),
-            ('enable', int(enabled)), ('delete', int(False)),
-            ('idd', '')
-        ]))
-
-    def update_rules(self, rules):
-        """
-        Update the port forwarding rules
-        """
-        # Will iterate multiple times, ensure it is a list.
-        rules = list(rules)
-
-        empty_asterisk = '*'*(len(rules) - 1)
-
-        # Order of parameters matters (code smell: YES)
-        params = OrderedDict([
-            ('action', 'apply'),
-            ('instance', '*'.join([str(r.id) for r in rules])),
-            ('local_IP', ''),
-            ('start_port', ''), ('end_port', ''),
-            ('start_portIn', empty_asterisk),
-            ('end_portIn', ''),
-            ('protocol', '*'.join([str(r.proto.value) for r in rules])),
-            ('enable', '*'.join([str(int(r.enabled)) for r in rules])),
-            ('delete', '*'.join([str(int(r.delete)) for r in rules])),
-            ('idd', empty_asterisk)
-        ])
-
-        LOGGER.info("Updating port forwards")
-        LOGGER.debug(params)
-
-        return self.modem.xml_setter(Set.PORT_FORWARDING, params)
-
-
 class FilterAction(Enum):
     """
     Filter action, used by internet access filters
@@ -556,145 +422,7 @@ class Filters(object):
         return self.modem.xml_setter(Set.FILTER_RULE, params)
 
 
-RadioSettings = recordclass('RadioSettings', [  # pylint: disable=invalid-name
-    'bss_coexistence', 'radio_2g', 'radio_5g', 'nv_country', 'channel_range'])
-BandSetting = recordclass('BandSetting', [  # pylint: disable=invalid-name
-    'mode', 'ssid', 'bss_enable', 'radio', 'bandwidth', 'tx_mode',
-    'multicast_rate', 'hidden', 'pre_shared_key', 'tx_rate', 're_key',
-    'channel', 'security', 'wpa_algorithm'])
 
-
-class WifiSettings(object):
-    """
-    Configures the WiFi settings
-    """
-
-    def __init__(self, modem):
-        # The modem sometimes returns invalid XML when 'strange' values are
-        # present in the settings. The recovering parser from lxml is used to
-        # handle this.
-        self.parser = etree.XMLParser(recover=True)
-
-        self.modem = modem
-
-    @property
-    def wifi_settings_xml(self):
-        """
-        Get the current wifi settings as XML
-        """
-        xml_content = self.modem.xml_getter(Get.WIRELESSBASIC, {}).content
-        return etree.fromstring(xml_content, parser=self.parser)
-
-    @staticmethod
-    def band_setting(xml, band):
-        """
-        Get the wifi settings for the given band (2g, 5g)
-        """
-        assert band in ('2g', '5g',)
-        band_number = int(band[0])
-
-        def xml_value(attr, coherce=True):
-            """
-            'XmlValue'
-
-            Coherce the value if requested. First the value is parsed as an
-            integer, if this fails it is returned as a string.
-            """
-            val = xml.find(attr).text
-            try:  # Try to coherce to int. If it fails, return string
-                if not coherce:
-                    return val
-                return int(val)
-            except (TypeError, ValueError):
-                return val
-
-        def band_xv(attr, coherce=True):
-            """
-            xml value for the given band
-            """
-            try:
-                return xml_value('{}{}'.format(attr, band.upper()), coherce)
-            except AttributeError:
-                return xml_value('{}{}'.format(attr, band), coherce)
-
-        return BandSetting(
-            radio=band,
-            mode=bool(xml_value('Bandmode') & band_number),
-            ssid=band_xv('SSID', False),
-            bss_enable=bool(band_xv('BssEnable')),
-            bandwidth=band_xv('BandWidth'),
-            tx_mode=band_xv('TransmissionMode'),
-            multicast_rate=band_xv('MulticastRate'),
-            hidden=band_xv('HideNetwork'),
-            pre_shared_key=band_xv('PreSharedKey'),
-            tx_rate=band_xv('TransmissionRate'),
-            re_key=band_xv('GroupRekeyInterval'),
-            channel=band_xv('CurrentChannel'),
-            security=band_xv('SecurityMode'),
-            wpa_algorithm=band_xv('WpaAlgorithm')
-        )
-
-    @property
-    def wifi_settings(self):
-        """
-        Read the wifi settings
-        """
-        xml = self.wifi_settings_xml
-
-        return RadioSettings(
-            radio_2g=WifiSettings.band_setting(xml, '2g'),
-            radio_5g=WifiSettings.band_setting(xml, '5g'),
-            nv_country=int(xml.find('NvCountry').text),
-            channel_range=int(xml.find('ChannelRange').text),
-            bss_coexistence=bool(xml.find('BssCoexistence').text)
-        )
-
-    def update_wifi_settings(self, settings):
-        """
-        Update the wifi settings
-        """
-        # Create the object.
-        def transform_radio(radio_settings):  # rs = radio_settings
-            """
-            Perpare radio settings object for the request.
-            Returns a OrderedDict with the correct keys for this band
-            """
-            # Create the dict
-            out = OrderedDict([
-                ('BandMode', int(radio_settings.mode)),
-                ('Ssid', radio_settings.ssid),
-                ('Bandwidth', radio_settings.bandwidth),
-                ('TxMode', radio_settings.tx_mode),
-                ('MCastRate', radio_settings.multicast_rate),
-                ('Hiden', int(radio_settings.hidden)),
-                ('PSkey', radio_settings.pre_shared_key),
-                ('Txrate', radio_settings.tx_rate),
-                ('Rekey', radio_settings.re_key),
-                ('Channel', radio_settings.channel),
-                ('Security', radio_settings.security),
-                ('Wpaalg', radio_settings.wpa_algorithm)
-            ])
-
-            # Prefix 'wl', Postfix the band
-            return OrderedDict([('wl{}{}'.format(k, radio_settings.radio), v)
-                                for (k, v) in out.items()])
-
-        # Alternate the two setting lists
-        out_s = []
-
-        for item_2g, item_5g in zip(
-                transform_radio(settings.radio_2g).items(),
-                transform_radio(settings.radio_5g).items()):
-            out_s.append(item_2g)
-            out_s.append(item_5g)
-
-            if item_2g[0] == 'wlHiden5g':
-                out_s.append(('wlCoexistence', settings.bss_coexistence))
-
-        # Join the settings
-        out_settings = OrderedDict(out_s)
-
-        return self.modem.xml_setter(Set.WIFI_SETTINGS, out_settings)
 
 
 class DHCPSettings(object):
@@ -876,116 +604,6 @@ class Diagnostics(object):
         return self.modem.xml_getter(Get.TRACEROUTE_RESULT, {})
 
 
-class BackupRestore(object):
-    """
-    Configuration backup and restore
-    """
-    def __init__(self, modem):
-        # The modem sometimes returns invalid XML when 'strange' values are
-        # present in the settings. The recovering parser from lxml is used to
-        # handle this.
-        self.parser = etree.XMLParser(recover=True)
-
-        self.modem = modem
-
-    def backup(self, filename=None):
-        """
-        Backup the configuration and return it's content
-        """
-        res = self.modem.xml_getter(Get.GLOBALSETTINGS, {})
-        xml = etree.fromstring(res.content, parser=self.parser)
-
-        if not filename:
-            fname = xml.find('ConfigVenderModel').text + "-Cfg.bin"
-        else:
-            fname = filename
-
-        res = self.modem.get("/xml/getter.xml", params={'filename': fname},
-                             allow_redirects=False)
-        if res.status_code != 200:
-            LOGGER.error("Did not get configfile response!"
-                         " Wrong config file name?")
-            return None
-
-        return res.content
-
-    def restore(self, data):
-        """
-        Restore the configuration from the binary string in `data`
-        """
-        LOGGER.info("Restoring config. Modem will reboot after that")
-        return self.modem.post_binary("/xml/getter.xml",
-                                      data, "Cfg_Restore.bin",
-                                      params={'Restore': len(data)})
-
-
-class FuncScanner(object):
-    """
-    Scan the modem for existing function calls
-    """
-    def __init__(self, modem, pos, key):
-        self.modem = modem
-        self.current_pos = pos
-        self.key = key
-        self.last_login = -1
-
-    @property
-    def is_valid_session(self):
-        """
-        Is the current sesion valid?
-        """
-        LOGGER.debug("Last login %d", self.last_login)
-        res = self.modem.xml_getter(Get.CM_SYSTEM_INFO, {})
-        return res.status_code == 200
-
-    def scan(self, quiet=False):
-        """
-        Scan the modem for functions. This iterates of the function calls
-        """
-        res = None
-        while not res or res.text is '':
-            if not quiet:
-                LOGGER.info("func=%s", self.current_pos)
-
-            res = self.modem.xml_getter(self.current_pos, {})
-            if res.text == '':
-                if not self.is_valid_session:
-                    self.last_login = self.current_pos
-                    self.modem.login(self.key)
-                    if not quiet:
-                        LOGGER.info("Had to login at index %s",
-                                    self.current_pos)
-                    continue
-
-            if res.status_code == 200:
-                self.current_pos += 1
-            else:
-                raise ValueError("HTTP {}".format(res.status_code))
-
-        return res
-
-    def scan_to_file(self):
-        """
-        Scan and write results to `func_i.xml` for all indices
-        """
-        while True:
-            res = self.scan()
-            xmlstr = minidom.parseString(res.content).toprettyxml(indent="   ")
-            with io.open("func_%i.xml" % (self.current_pos - 1), "wt") as f:  # noqa pylint: disable=invalid-name
-                f.write("===== HEADERS =====\n")
-                f.write(str(res.headers))
-                f.write("\n===== DATA ======\n")
-                f.write(xmlstr)
-
-    def enumerate(self):
-        """
-        Enumerate the function calls, outputting id <=> response tag name pairs
-        """
-        while True:
-            res = self.scan(quiet=True)
-            xml = minidom.parseString(res.content)
-            LOGGER.info("%s = %d", xml.documentElement.tagName.upper(),
-                        self.current_pos - 1)
 
 
 class LanTable:
@@ -995,19 +613,19 @@ class LanTable:
 
     def __init__(self, modem):
         self.modem = modem
-        self.parser = etree.XMLParser(recover=True)
         self.table = None
         self.refresh()
 
-    def _parse_lan_table_xml(self, xml):
+    def _parse_lan_table_xml(self, dom):
         table = {LanTable.ETHERNET: [], LanTable.WIFI: []}
         for con_type in table.keys():
-            for client in xml.find(con_type).findall("clientinfo"):
+            con_node = dom.getElementsByTagName(con_type)[0]
+            for client in con_node.childNodes:
                 client_info = {}
-                for prop in client:
-                    client_info[prop.tag] = prop.text
+                for prop in client.childNodes:
+                    client_info[prop.tagName] = prop.firstChild.nodeValue
                 table[con_type].append(client_info)
-        table[LanTable.TOTAL] = xml.find(LanTable.TOTAL).text
+        table[LanTable.TOTAL] = dom.getElementsByTagName(LanTable.TOTAL)[0].firstChild.nodeValue
         self.table = table
 
     def _check_data(self):
@@ -1019,8 +637,8 @@ class LanTable:
         if resp.status_code != 200:
             LOGGER.error("Didn't receive correct response, try to call LanTable.refresh()")
             return
-        xml = etree.fromstring(resp.content, parser=self.parser)
-        self._parse_lan_table_xml(xml)
+        dom = minidom.parseString(resp.content)
+        self._parse_lan_table_xml(dom)
 
     def get_lan(self):
         self._check_data()
